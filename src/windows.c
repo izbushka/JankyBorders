@@ -528,7 +528,14 @@ static bool windows_window_create_internal(struct table* windows,
 }
 
 bool windows_window_create(struct table* windows, uint32_t wid, uint64_t sid) {
-  return windows_window_create_internal(windows, wid, sid, false);
+  bool created = windows_window_create_internal(windows, wid, sid, false);
+  if (!created
+      && g_settings.active_only
+      && windows_window_eligibility(SLSMainConnectionID(), wid)
+         == WINDOW_TRACKING_ALLOWED) {
+    windows_update_notifications(windows);
+  }
+  return created;
 }
 
 static bool windows_remove_all(struct table* windows) {
@@ -704,44 +711,137 @@ bool windows_window_destroy(struct table* windows, uint32_t wid, uint32_t sid) {
   return false;
 }
 
+static CFArrayRef windows_copy_current_space_windows(int cid) {
+  CFArrayRef displays = SLSCopyManagedDisplays(cid);
+  if (!displays) return NULL;
+
+  CFIndex space_count_ref = CFArrayGetCount(displays);
+  if (space_count_ref <= 0 || space_count_ref > INT_MAX
+      || (size_t)space_count_ref > SIZE_MAX / sizeof(uint64_t)) {
+    CFRelease(displays);
+    return NULL;
+  }
+  int space_count = (int)space_count_ref;
+  uint64_t* space_list = calloc((size_t)space_count, sizeof(uint64_t));
+  if (!space_list) {
+    CFRelease(displays);
+    return NULL;
+  }
+
+  for (int i = 0; i < space_count; i++) {
+    space_list[i] = SLSManagedDisplayGetCurrentSpace(cid,
+                                          CFArrayGetValueAtIndex(displays, i));
+  }
+
+  CFRelease(displays);
+
+  CFArrayRef space_list_ref = cfarray_of_cfnumbers(space_list,
+                                                   sizeof(uint64_t),
+                                                   space_count,
+                                                   kCFNumberSInt64Type);
+  free(space_list);
+  if (!space_list_ref) return NULL;
+
+  uint64_t set_tags = 1;
+  uint64_t clear_tags = 0;
+  CFArrayRef window_list = SLSCopyWindowsWithOptionsAndTags(cid,
+                                                            0,
+                                                            space_list_ref,
+                                                            0x2,
+                                                            &set_tags,
+                                                            &clear_tags    );
+  CFRelease(space_list_ref);
+  return window_list;
+}
+
+static bool window_list_append(uint32_t** list,
+                               size_t* count,
+                               size_t* capacity,
+                               uint32_t wid) {
+  for (size_t i = 0; i < *count; ++i) {
+    if ((*list)[i] == wid) return true;
+  }
+  if (*count == *capacity) {
+    size_t next = *capacity ? *capacity * 2 : 16;
+    if (next > INT_MAX || next > SIZE_MAX / sizeof(uint32_t)) return false;
+    uint32_t* grown = realloc(*list, next * sizeof(uint32_t));
+    if (!grown) return false;
+    *list = grown;
+    *capacity = next;
+  }
+  (*list)[(*count)++] = wid;
+  return true;
+}
+
+// Active-only keeps a helper for the focused window only, but a click that
+// focuses another window of the same application raises no front-application
+// event: WindowServer only reports it as a reorder of that window, and
+// per-window events are only delivered for requested windows. Request them
+// for every window that could receive a border, so focus changes are seen
+// immediately instead of on the next unrelated event.
+static bool windows_append_focus_candidates(int cid,
+                                            uint32_t** list,
+                                            size_t* count,
+                                            size_t* capacity) {
+  CFArrayRef window_list = windows_copy_current_space_windows(cid);
+  if (!window_list) return true;
+
+  bool appended = true;
+  CFTypeRef query = SLSWindowQueryWindows(cid, window_list, 0x0);
+  if (query) {
+    CFTypeRef iterator = SLSWindowQueryResultCopyWindows(query);
+    if (iterator) {
+      while (appended && SLSWindowIteratorAdvance(iterator)) {
+        if (!window_suitable(iterator)) continue;
+        uint32_t wid = SLSWindowIteratorGetWindowID(iterator);
+        if (windows_window_eligibility(cid, wid) != WINDOW_TRACKING_ALLOWED) {
+          continue;
+        }
+        appended = window_list_append(list, count, capacity, wid);
+      }
+      CFRelease(iterator);
+    }
+    CFRelease(query);
+  }
+  CFRelease(window_list);
+  return appended;
+}
+
 void windows_update_notifications(struct table* windows) {
   if (!windows || windows->capacity < 0) return;
 
+  uint32_t* window_list = NULL;
   size_t window_count = 0;
-  for (int i = 0; i < windows->capacity; ++i) {
-    struct bucket* bucket = windows->buckets[i];
-    while (bucket) {
-      if (bucket->value) {
-        if (window_count == INT_MAX) return;
-        ++window_count;
-      }
-      bucket = bucket->next;
-    }
-  }
-
-  if (window_count > SIZE_MAX / sizeof(uint32_t)) return;
-  uint32_t* window_list = window_count
-                          ? malloc(window_count * sizeof(uint32_t))
-                          : NULL;
-  if (window_count && !window_list) return;
-
-  size_t index = 0;
+  size_t window_capacity = 0;
   for (int i = 0; i < windows->capacity; ++i) {
     struct bucket *bucket = windows->buckets[i];
     while (bucket) {
-      if (bucket->value && index < window_count) {
-        uint32_t wid = *(uint32_t *) bucket->key;
-        window_list[index++] = wid;
+      if (bucket->value
+          && !window_list_append(&window_list,
+                                 &window_count,
+                                 &window_capacity,
+                                 *(uint32_t *) bucket->key)) {
+        free(window_list);
+        return;
       }
       bucket = bucket->next;
     }
   }
 
   int cid = SLSMainConnectionID();
+  if (g_settings.active_only
+      && !windows_append_focus_candidates(cid,
+                                          &window_list,
+                                          &window_count,
+                                          &window_capacity)) {
+    free(window_list);
+    return;
+  }
+
   uint32_t empty_window = 0;
   SLSRequestNotificationsForWindows(cid,
                                     window_list ? window_list : &empty_window,
-                                    (int)index);
+                                    (int)window_count);
   free(window_list);
 }
 
@@ -948,47 +1048,13 @@ void windows_draw_borders_on_current_spaces(struct table* windows) {
   // Space events are intentionally handled through the caller's delayed
   // consistency pass. Native-fullscreen windows may still have their old SID
   // when the event first arrives, so active-only must not refresh eagerly.
-  if (g_settings.active_only) return;
-
-  CFArrayRef displays = SLSCopyManagedDisplays(cid);
-  if (!displays) return;
-
-  CFIndex space_count_ref = CFArrayGetCount(displays);
-  if (space_count_ref <= 0 || space_count_ref > INT_MAX
-      || (size_t)space_count_ref > SIZE_MAX / sizeof(uint64_t)) {
-    CFRelease(displays);
-    return;
-  }
-  int space_count = (int)space_count_ref;
-  uint64_t* space_list = calloc((size_t)space_count, sizeof(uint64_t));
-  if (!space_list) {
-    CFRelease(displays);
+  // Its focus candidates did change with the Space, though.
+  if (g_settings.active_only) {
+    windows_update_notifications(windows);
     return;
   }
 
-  for (int i = 0; i < space_count; i++) {
-    space_list[i] = SLSManagedDisplayGetCurrentSpace(cid,
-                                          CFArrayGetValueAtIndex(displays, i));
-  }
-
-  CFRelease(displays);
-
-  CFArrayRef space_list_ref = cfarray_of_cfnumbers(space_list,
-                                                   sizeof(uint64_t),
-                                                   space_count,
-                                                   kCFNumberSInt64Type);
-  free(space_list);
-  if (!space_list_ref) return;
-
-  uint64_t set_tags = 1;
-  uint64_t clear_tags = 0;
-  CFArrayRef window_list = SLSCopyWindowsWithOptionsAndTags(cid,
-                                                            0,
-                                                            space_list_ref,
-                                                            0x2,
-                                                            &set_tags,
-                                                            &clear_tags    );
-
+  CFArrayRef window_list = windows_copy_current_space_windows(cid);
   if (window_list) {
     CFTypeRef query = SLSWindowQueryWindows(cid, window_list, 0x0);
     if (query) {
@@ -1010,7 +1076,6 @@ void windows_draw_borders_on_current_spaces(struct table* windows) {
     }
     CFRelease(window_list);
   }
-  CFRelease(space_list_ref);
 }
 
 void windows_refresh_after_space_change(struct table* windows,
