@@ -551,7 +551,7 @@ static bool border_refresh_space(struct border* border, bool retry_helpers) {
 bool border_update_internal(struct border* border, struct settings* settings) {
   bool target_space_known = border_refresh_space(border, false);
   if (border->external_proxy_wid) return true;
-  if (settings->border_style == BORDER_STYLE_NONE) {
+  if (border_settings_hidden(settings)) {
     border_hide(border);
     return false;
   }
@@ -835,7 +835,7 @@ void border_unhide(struct border* border) {
   pthread_mutex_lock(&border->mutex);
   (void)border_refresh_space(border, false);
   struct settings* settings = border_get_settings(border);
-  if (settings->border_style == BORDER_STYLE_NONE
+  if (border_settings_hidden(settings)
       || border->too_small
       || border->external_proxy_wid
       || (!border->sticky && !is_space_visible(border->cid, border->sid))) {

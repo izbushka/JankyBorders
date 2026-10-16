@@ -33,6 +33,7 @@ pid_t g_pid;
 mach_port_t g_server_port;
 struct table g_windows;
 struct mach_server g_mach_server;
+bool g_mission_control_active = false;
 struct settings g_settings = { .enabled = true,
                                .active_window = { .stype = COLOR_STYLE_SOLID,
                                                   .colors = { 0xffe1e3e4,

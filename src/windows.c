@@ -629,8 +629,7 @@ static bool windows_window_focus(struct table* windows, uint32_t wid) {
     target->focused = true;
     target->needs_redraw = true;
     struct settings* target_settings = border_get_settings(target);
-    bool intentionally_hidden =
-        target_settings->border_style == BORDER_STYLE_NONE;
+    bool intentionally_hidden = border_settings_hidden(target_settings);
     if (intentionally_hidden) {
       border_hide(target);
     } else if (!border_update(target, true)) {
@@ -848,7 +847,7 @@ enum windows_focus_refresh_result windows_refresh_active_window(
     }
     if (!target) return WINDOWS_FOCUS_REFRESH_HELD;
     struct settings* target_settings = border_get_settings(target);
-    if (target_settings->border_style == BORDER_STYLE_NONE) {
+    if (border_settings_hidden(target_settings)) {
       border_hide(target);
     } else if (!border_update(target, false)) {
       return WINDOWS_FOCUS_REFRESH_HELD;
@@ -911,6 +910,17 @@ void windows_adaptive_space_change_started(struct table* windows) {
     while (bucket) {
       struct border* border = bucket->value;
       if (border) windows_adaptive_invalidate_border(border, false);
+      bucket = bucket->next;
+    }
+  }
+}
+
+void windows_hide_all(struct table* windows) {
+  if (!windows || !windows->buckets) return;
+  for (int i = 0; i < windows->capacity; ++i) {
+    struct bucket* bucket = windows->buckets[i];
+    while (bucket) {
+      if (bucket->value) border_hide(bucket->value);
       bucket = bucket->next;
     }
   }

@@ -5,6 +5,8 @@
 #include "focus_recovery.h"
 #include "misc/window.h"
 #include "space_recovery.h"
+#include "mission_control.h"
+#include <libproc.h>
 #include <string.h>
 
 extern struct table g_windows;
@@ -109,6 +111,75 @@ static bool is_own_window(int cid, uint32_t wid) {
   return pid == g_pid;
 }
 
+static struct mission_control_state mission_control;
+
+static bool mission_control_window_exists(uint32_t wid, void* context) {
+  int wid_cid = 0;
+  return SLSGetWindowOwner((int)(intptr_t)context, wid, &wid_cid)
+           == kCGErrorSuccess
+         && wid_cid;
+}
+
+static bool mission_control_covers_display(CGRect bounds) {
+  uint32_t count = 0;
+  if (CGGetActiveDisplayList(0, NULL, &count) != kCGErrorSuccess || !count) {
+    return false;
+  }
+
+  CGDirectDisplayID displays[count];
+  if (CGGetActiveDisplayList(count, displays, &count) != kCGErrorSuccess) {
+    return false;
+  }
+  for (uint32_t i = 0; i < count; ++i) {
+    if (CGRectEqualToRect(bounds, CGDisplayBounds(displays[i]))) return true;
+  }
+  return false;
+}
+
+static bool mission_control_is_backdrop(int cid, uint32_t wid) {
+  if (window_level(cid, wid) != MISSION_CONTROL_BACKDROP_LEVEL) return false;
+
+  int wid_cid = 0;
+  pid_t pid = 0;
+  if (SLSGetWindowOwner(cid, wid, &wid_cid) != kCGErrorSuccess
+      || SLSConnectionGetPID(wid_cid, &pid) != kCGErrorSuccess
+      || pid <= 0) {
+    return false;
+  }
+
+  char name[PROC_PIDPATHINFO_MAXSIZE] = { 0 };
+  if (proc_name(pid, name, sizeof(name)) <= 0
+      || strcmp(name, MISSION_CONTROL_OWNER) != 0) {
+    return false;
+  }
+
+  CGRect bounds;
+  return SLSGetWindowBounds(cid, wid, &bounds) == kCGErrorSuccess
+         && mission_control_covers_display(bounds);
+}
+
+static void mission_control_apply(enum mission_control_transition transition) {
+  if (transition == MISSION_CONTROL_TRANSITION_ENTER
+      && !g_mission_control_active) {
+    debug("Mission Control Enter\n");
+    g_mission_control_active = true;
+    windows_hide_all(&g_windows);
+  } else if (transition == MISSION_CONTROL_TRANSITION_EXIT
+             && g_mission_control_active) {
+    debug("Mission Control Exit\n");
+    g_mission_control_active = false;
+    // Border windows were kept alive while hidden; the regular bounded
+    // Space consistency pass re-shows them and re-resolves focus.
+    events_schedule_space_refresh();
+  }
+}
+
+static void mission_control_prune_backdrops(int cid) {
+  mission_control_apply(mission_control_prune(&mission_control,
+                                              mission_control_window_exists,
+                                              (void*)(intptr_t)cid));
+}
+
 static void window_spawn_handler(uint32_t event,
                                  void* data,
                                  size_t data_length,
@@ -122,6 +193,16 @@ static void window_spawn_handler(uint32_t event,
   struct table* windows = &g_windows;
 
   if (!wid || !sid || is_own_window(cid, wid)) return;
+
+  if (event == EVENT_WINDOW_CREATE) {
+    if (mission_control_is_backdrop(cid, wid)) {
+      mission_control_apply(mission_control_add_backdrop(&mission_control,
+                                                         wid));
+    }
+  } else if (event == EVENT_WINDOW_DESTROY
+             && mission_control_tracks(&mission_control, wid)) {
+    mission_control_prune_backdrops(cid);
+  }
 
   if (event == EVENT_WINDOW_CREATE) {
     if (windows_window_create(windows, wid, sid)) {
@@ -191,6 +272,9 @@ static void front_app_handler(uint32_t event,
   (void)data;
   (void)data_length;
   (void)context;
+  // Leaving Mission Control always changes the front application; prune here
+  // too so a missed destroy event cannot keep borders hidden.
+  mission_control_prune_backdrops(SLSMainConnectionID());
   debug("Window Focus\n");
   events_restart_focus_refresh();
 }

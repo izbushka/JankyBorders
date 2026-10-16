@@ -47,6 +47,8 @@ test: | bin
 	./bin/adaptive_color_test
 	clang -std=c99 -Wall -Wextra -Werror -O0 -g tests/adaptive_lifecycle_test.c -o bin/adaptive_lifecycle_test
 	./bin/adaptive_lifecycle_test
+	clang -std=c99 -Wall -Wextra -Werror -O0 -g tests/mission_control_test.c -o bin/mission_control_test
+	./bin/mission_control_test
 
 test-sanitize: | bin
 	clang -std=c99 -Wall -Wextra -O1 -g $(SANITIZER_FLAGS) -Isrc $(SAFETY_TEST_FILES) -o bin/safety_tests_sanitize $(LIBS)
@@ -73,6 +75,8 @@ test-sanitize: | bin
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ./bin/adaptive_color_test_sanitize
 	clang -std=c99 -Wall -Wextra -Werror -O1 -g $(SANITIZER_FLAGS) tests/adaptive_lifecycle_test.c -o bin/adaptive_lifecycle_test_sanitize
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ./bin/adaptive_lifecycle_test_sanitize
+	clang -std=c99 -Wall -Wextra -Werror -O1 -g $(SANITIZER_FLAGS) tests/mission_control_test.c -o bin/mission_control_test_sanitize
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ./bin/mission_control_test_sanitize
 
 test-thread: | bin
 	clang -std=c99 -Wall -Wextra -Werror -O1 -g $(THREAD_SANITIZER_FLAGS) tests/animation_lifecycle_test.c -o bin/animation_lifecycle_test_tsan -framework CoreVideo

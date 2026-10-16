@@ -8,6 +8,7 @@
 #include "animation.h"
 #include "adaptive_color.h"
 #include "hashtable.h"
+#include "mission_control.h"
 
 #define BORDER_ORDER_ABOVE 1
 #define BORDER_ORDER_BELOW -1
@@ -73,6 +74,14 @@ struct settings {
   bool active_only;
   enum adaptive_color_mode adaptive_color;
 };
+
+// Borders are intentionally hidden either by style=none or, process-wide,
+// while macOS 27 Mission Control is shown. Unlike style=none, Mission Control
+// keeps every border window alive so it can be shown again without a rebuild.
+static inline bool border_settings_hidden(const struct settings* settings) {
+  return settings->border_style == BORDER_STYLE_NONE
+         || g_mission_control_active;
+}
 
 // Application filters have process-wide scope. Keep their owning tables out of
 // struct settings, which is intentionally shallow-copied for window overrides.
