@@ -873,6 +873,15 @@ static enum focus_recovery_resolution windows_focus_resolution_kind(
   return FOCUS_RECOVERY_RESULT_TRANSIENT;
 }
 
+static void windows_retire_visible_focus(struct table* windows) {
+  uint32_t focused_wid = windows_focused_window_id(windows);
+  if (!focused_wid) return;
+  struct border* focused = table_find(windows, &focused_wid);
+  windows_window_focus(windows, 0);
+  // Active-only does not redraw retired borders as inactive; hide it.
+  if (focused && g_settings.active_only) border_hide(focused);
+}
+
 enum windows_focus_refresh_result windows_refresh_active_window(
     struct table* windows,
     bool allow_clear) {
@@ -922,7 +931,14 @@ enum windows_focus_refresh_result windows_refresh_active_window(
     enum window_tracking_eligibility eligibility =
         windows_window_eligibility(cid, front_wid);
     if (eligibility == WINDOW_TRACKING_REJECTED) {
-      if (!allow_clear) return WINDOWS_FOCUS_REFRESH_HELD;
+      if (!allow_clear) {
+        // A rejected front window (filtered app, own window, style=none) is
+        // a definite answer, so retire the visible focus right away instead
+        // of after the whole probe series. Removing helpers still waits for
+        // the final probe; a transient answer is corrected by the next one.
+        windows_retire_visible_focus(windows);
+        return WINDOWS_FOCUS_REFRESH_HELD;
+      }
       windows_window_focus(windows, 0);
       windows_remove_all_except(windows, 0);
       focus_committed_front_cid = 0;
